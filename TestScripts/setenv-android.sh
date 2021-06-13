@@ -1,402 +1,454 @@
 #!/usr/bin/env bash
 
-# ====================================================================
-# Sets the cross compile environment for Android
-# Based upon OpenSSL's setenv-android.sh (by TH, JW, and SM).
+#############################################################################
+#
+# This script sets the cross-compile environment for Android.
+#
+# Based upon OpenSSL's setenv-android.sh by TH, JW, and SM.
+# Heavily modified by JWW for Crypto++.
+# Modified by Skycoder42 Android NDK-r19 and above.
+# Modified some more by JW and UB.
 #
 # Crypto++ Library is copyrighted as a compilation and (as of version 5.6.2)
 # licensed under the Boost Software License 1.0, while the individual files
 # in the compilation are all public domain.
 #
+# Also see:
+#   https://android.googlesource.com/platform/ndk.git/+/HEAD/docs/UnifiedHeaders.md
+#   https://android.googlesource.com/platform/ndk/+/master/docs/PlatformApis.md
+#   https://developer.android.com/ndk/guides/abis.html and
+#   https://developer.android.com/ndk/guides/cpp-support.
+#
 # See http://www.cryptopp.com/wiki/Android_(Command_Line) for more details
-# ====================================================================
+#############################################################################
 
-set -eu
+#########################################
+#####        Some validation        #####
+#########################################
 
-unset IS_CROSS_COMPILE
+# cryptest-android.sh may run this script without sourcing.
+if [ "$0" = "${BASH_SOURCE[0]}" ]; then
+    echo "setenv-android.sh is usually sourced, but not this time."
+fi
+
+# This supports both 'source setenv-android.sh 21 arm64' and
+# 'source setenv-android.sh ANDROID_API=21 ANDROID_CPU=arm64'
+if [[ -n "$1" ]]
+then
+    arg1=$(echo "$1" | cut -f 1 -d '=')
+    arg2=$(echo "$1" | cut -f 2 -d '=')
+    if [[ -n "${arg2}" ]]; then
+        ANDROID_API="${arg2}"
+    else
+        ANDROID_API="${arg1}"
+    fi
+    printf "Using positional arg, ANDROID_API=%s\n" "${ANDROID_API}"
+fi
+
+# This supports both 'source setenv-android.sh 21 arm64' and
+# 'source setenv-android.sh ANDROID_API=21 ANDROID_CPU=arm64'
+if [[ -n "$2" ]]
+then
+    arg1=$(echo "$2" | cut -f 1 -d '=')
+    arg2=$(echo "$2" | cut -f 2 -d '=')
+    if [[ -n "${arg2}" ]]; then
+        ANDROID_CPU="${arg2}"
+    else
+        ANDROID_CPU="${arg1}"
+    fi
+    printf "Using positional arg, ANDROID_CPU=%s\n" "${ANDROID_CPU}"
+fi
+
+if [ -z "${ANDROID_API}" ]; then
+    echo "ANDROID_API is not set. Please set it"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+if [ -z "${ANDROID_CPU}" ]; then
+    echo "ANDROID_CPU is not set. Please set it"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+DEF_CPPFLAGS="-DNDEBUG"
+DEF_CFLAGS="-Wall -g2 -O3 -fPIC"
+DEF_CXXFLAGS="-Wall -g2 -O3 -fPIC"
+DEF_LDFLAGS=""
+
+#########################################
+#####       Clear old options       #####
+#########################################
 
 unset IS_IOS
+unset IS_MACOS
 unset IS_ANDROID
 unset IS_ARM_EMBEDDED
 
-# Variables used in GNUmakefile-cross
-unset AOSP_FLAGS
-unset AOSP_SYSROOT
-unset AOSP_STL_INC
-unset AOSP_STL_LIB
-unset AOSP_BITS_INC
+unset ANDROID_CPPFLAGS
+unset ANDROID_CFLAGS
+unset ANDROID_CXXFLAGS
+unset ANDROID_LDFLAGS
+unset ANDROID_SYSROOT
 
-# Former variables
-unset ANDROID_FLAGS ANDROID_SYSROOT
-unset ANDROID_STL_INC ANDROID_STL_LIB
+#########################################
+#####    Small Fixups, if needed    #####
+#########################################
 
-# Tools set by this script
-unset CPP CC CXX LD AS AR RANLIB STRIP
+ANDROID_CPU=$(tr '[:upper:]' '[:lower:]' <<< "${ANDROID_CPU}")
 
-# Similar to a "make clean"
-if [ x"${1-}" = "xunset" ]; then
-	echo "Unsetting script variables. PATH may remain tainted"
-	[ "$0" = "$BASH_SOURCE" ] && exit 0 || return 0
+if [[ "$ANDROID_CPU" == "amd64" || "$ANDROID_CPU" == "x86_64" ]] ; then
+    ANDROID_CPU=x86_64
 fi
 
-# Set AOSP_TOOLCHAIN_SUFFIX to your preference of tools and STL library.
-#   Note: 4.9 is required for the latest architectures, like ARM64/AARCH64.
-# AOSP_TOOLCHAIN_SUFFIX=4.8
-# AOSP_TOOLCHAIN_SUFFIX=4.9
-if [ -z "${AOSP_TOOLCHAIN_SUFFIX-}" ]; then
-	AOSP_TOOLCHAIN_SUFFIX=4.9
+if [[ "$ANDROID_CPU" == "i386" || "$ANDROID_CPU" == "i686" ]] ; then
+    ANDROID_CPU=i686
 fi
 
-# Set AOSP_API to the API you want to use. 'armeabi' and 'armeabi-v7a' need
-#   API 3 (or above), 'mips' and 'x86' need API 9 (or above), etc.
-# AOSP_API="android-3"     # Android 1.5 and above
-# AOSP_API="android-4"     # Android 1.6 and above
-# AOSP_API="android-5"     # Android 2.0 and above
-# AOSP_API="android-8"     # Android 2.2 and above
-# AOSP_API="android-9"     # Android 2.3 and above
-# AOSP_API="android-14"    # Android 4.0 and above
-# AOSP_API="android-18"    # Android 4.3 and above
-# AOSP_API="android-19"    # Android 4.4 and above
-# AOSP_API="android-21"    # Android 5.0 and above
-# AOSP_API="android-23"    # Android 6.0 and above
-if [ -z "${AOSP_API-}" ]; then
-	AOSP_API="android-21"
+if [[ "$ANDROID_CPU" == "armv7"* || "$ANDROID_CPU" == "armeabi"* ]] ; then
+    ANDROID_CPU=armeabi-v7a
 fi
 
-#####################################################################
+if [[ "$ANDROID_CPU" == "aarch64" || "$ANDROID_CPU" == "arm64"* || "$ANDROID_CPU" == "armv8"* ]] ; then
+    ANDROID_CPU=arm64-v8a
+fi
+
+echo "Configuring for $ANDROID_SDK ($ANDROID_CPU)"
+
+########################################
+#####         Environment          #####
+########################################
 
 # ANDROID_NDK_ROOT should always be set by the user (even when not running this script)
-#   http://groups.google.com/group/android-ndk/browse_thread/thread/a998e139aca71d77.
-# If the user did not specify the NDK location, try and pick it up. We expect something
-#   like ANDROID_NDK_ROOT=/opt/android-ndk-r10e or ANDROID_NDK_ROOT=/usr/local/android-ndk-r10e.
+# http://groups.google.com/group/android-ndk/browse_thread/thread/a998e139aca71d77.
+# If the user did not specify the NDK location, try and pick it up. Something like
+# ANDROID_NDK_ROOT=/opt/android-ndk-r19c or ANDROID_NDK_ROOT=/usr/local/android-ndk-r20.
 
-if [ -z "${ANDROID_NDK_ROOT-}" ]; then
-	ANDROID_NDK_ROOT=$(find /opt -maxdepth 1 -type d -name android-ndk-r10* 2>/dev/null | tail -1)
+if [ -n "${ANDROID_NDK_ROOT}" ]; then
+    echo "ANDROID_NDK_ROOT is ${ANDROID_NDK_ROOT}"
+else
+    echo "ANDROID_NDK_ROOT is empty. Searching for the NDK"
+    ANDROID_NDK_ROOT=$(find /opt -maxdepth 1 -type d -name "android-ndk*" 2>/dev/null | tail -n -1)
 
-	if [ -z "$ANDROID_NDK_ROOT" ]; then
-		ANDROID_NDK_ROOT=$(find /usr/local -maxdepth 1 -type d -name android-ndk-r10* 2>/dev/null | tail -1)
-	fi
-	if [ -z "$ANDROID_NDK_ROOT" ]; then
-		ANDROID_NDK_ROOT=$(find $HOME -maxdepth 1 -type d -name android-ndk-r10* 2>/dev/null | tail -1)
-	fi
-	if [ -d "$HOME/Library/Android/sdk/ndk-bundle" ]; then
-		ANDROID_NDK_ROOT="$HOME/Library/Android/sdk/ndk-bundle"
-	fi
+    if [ -z "${ANDROID_NDK_ROOT}" ]; then
+        ANDROID_NDK_ROOT=$(find /usr/local -maxdepth 1 -type d -name "android-ndk*" 2>/dev/null | tail -n -1)
+    fi
+    if [ -z "${ANDROID_NDK_ROOT}" ]; then
+        ANDROID_NDK_ROOT=$(find "$HOME" -maxdepth 1 -type d -name "android-ndk*" 2>/dev/null | tail -n -1)
+    fi
+    if [ -d "$HOME/Library/Android/sdk/ndk-bundle" ]; then
+        ANDROID_NDK_ROOT="$HOME/Library/Android/sdk/ndk-bundle"
+    fi
 fi
 
 # Error checking
-if [ ! -d "$ANDROID_NDK_ROOT/toolchains" ]; then
-	echo "ERROR: ANDROID_NDK_ROOT is not a valid path. Please set it."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
+if [ ! -d "${ANDROID_NDK_ROOT}" ]; then
+    echo "ERROR: ANDROID_NDK_ROOT is not a valid path for ${USER}. Please set it."
+    echo "ANDROID_NDK_ROOT is '${ANDROID_NDK_ROOT}'"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+# Error checking
+if [ ! -d "${ANDROID_SDK_ROOT}" ]; then
+    echo "ERROR: ANDROID_SDK_ROOT is not a valid path for ${USER}. Please set it."
+    echo "ANDROID_SDK_ROOT is '${ANDROID_SDK_ROOT}'"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+# User feedback
+#echo "ANDROID_NDK_ROOT is '${ANDROID_NDK_ROOT}'"
+#echo "ANDROID_SDK_ROOT is '${ANDROID_SDK_ROOT}'"
+
+#####################################################################
+
+# Need to set HOST_TAG to darwin-x86_64, linux-x86_64,
+# windows, or windows-x86_64
+
+if [[ "$(uname -s | grep -i -c darwin)" -ne 0 ]]; then
+    HOST_TAG=darwin-x86_64
+elif [[ "$(uname -s | grep -i -c linux)" -ne 0 ]]; then
+    HOST_TAG=linux-x86_64
+else
+    echo "ERROR: Unknown host"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+ANDROID_TOOLCHAIN="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/${HOST_TAG}/bin"
+ANDROID_SYSROOT="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/${HOST_TAG}/sysroot"
+
+# Error checking
+if [ ! -d "${ANDROID_TOOLCHAIN}" ]; then
+    echo "ERROR: ANDROID_TOOLCHAIN is not a valid path. Please set it."
+    echo "ANDROID_TOOLCHAIN is '${ANDROID_TOOLCHAIN}'"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+# Error checking
+if [ ! -d "${ANDROID_SYSROOT}" ]; then
+    echo "ERROR: ANDROID_SYSROOT is not a valid path. Please set it."
+    echo "ANDROID_SYSROOT is '${ANDROID_SYSROOT}'"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
 fi
 
 #####################################################################
 
-if [ "$#" -lt 1 ]; then
-	THE_ARCH=armv7
-else
-	THE_ARCH=$(tr [A-Z] [a-z] <<< "$1")
-fi
+# https://developer.android.com/ndk/guides/abis.html and
+# https://developer.android.com/ndk/guides/cpp-support.
+# Since NDK r16 the only STL available is libc++, so we
+# add -std=c++11 -stdlib=libc++ to CXXFLAGS. This is
+# consistent with Android.mk and 'APP_STL := c++_shared'.
 
-# https://developer.android.com/ndk/guides/abis.html
-case "$THE_ARCH" in
-  arm|armv5|armv6|armv7|armeabi)
-	TOOLCHAIN_ARCH="arm-linux-androideabi"
-	TOOLCHAIN_NAME="arm-linux-androideabi"
-	AOSP_ABI="armeabi"
-	AOSP_ARCH="arch-arm"
-	AOSP_FLAGS="-march=armv5te -mtune=xscale -mthumb -msoft-float -funwind-tables -fexceptions -frtti"
-	;;
-  armv7a|armeabi-v7a)
-	TOOLCHAIN_ARCH="arm-linux-androideabi"
-	TOOLCHAIN_NAME="arm-linux-androideabi"
-	AOSP_ABI="armeabi-v7a"
-	AOSP_ARCH="arch-arm"
-	AOSP_FLAGS="-march=armv7-a -mthumb -mfpu=vfpv3-d16 -mfloat-abi=softfp -Wl,--fix-cortex-a8 -funwind-tables -fexceptions -frtti"
-	;;
-  hard|armv7a-hard|armeabi-v7a-hard)
-	TOOLCHAIN_ARCH="arm-linux-androideabi"
-	TOOLCHAIN_NAME="arm-linux-androideabi"
-	AOSP_ABI="armeabi-v7a"
-	AOSP_ARCH="arch-arm"
-	AOSP_FLAGS="-mhard-float -D_NDK_MATH_NO_SOFTFP=1 -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -Wl,--fix-cortex-a8 -funwind-tables -fexceptions -frtti -Wl,--no-warn-mismatch -Wl,-lm_hard"
-	;;
-  neon|armv7a-neon)
-	TOOLCHAIN_ARCH="arm-linux-androideabi"
-	TOOLCHAIN_NAME="arm-linux-androideabi"
-	AOSP_ABI="armeabi-v7a"
-	AOSP_ARCH="arch-arm"
-	AOSP_FLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=softfp -Wl,--fix-cortex-a8 -funwind-tables -fexceptions -frtti"
-	;;
-  armv8|armv8a|aarch64|arm64|arm64-v8a)
-	TOOLCHAIN_ARCH="aarch64-linux-android"
-	TOOLCHAIN_NAME="aarch64-linux-android"
-	AOSP_ABI="arm64-v8a"
-	AOSP_ARCH="arch-arm64"
-	AOSP_FLAGS="-funwind-tables -fexceptions -frtti"
-	;;
-  mips|mipsel)
-	TOOLCHAIN_ARCH="mipsel-linux-android"
-	TOOLCHAIN_NAME="mipsel-linux-android"
-	AOSP_ABI="mips"
-	AOSP_ARCH="arch-mips"
-	AOSP_FLAGS="-funwind-tables -fexceptions -frtti"
-	;;
-  mips64|mipsel64|mips64el)
-	TOOLCHAIN_ARCH="mips64el-linux-android"
-	TOOLCHAIN_NAME="mips64el-linux-android"
-	AOSP_ABI="mips64"
-	AOSP_ARCH="arch-mips64"
-	AOSP_FLAGS="-funwind-tables -fexceptions -frtti"
-	;;
-  x86)
-	TOOLCHAIN_ARCH="x86"
-	TOOLCHAIN_NAME="i686-linux-android"
-	AOSP_ABI="x86"
-	AOSP_ARCH="arch-x86"
-	AOSP_FLAGS="-march=i686 -mtune=intel -mssse3 -mfpmath=sse -funwind-tables -fexceptions -frtti"
-	;;
+case "$ANDROID_CPU" in
+  armv7*|armeabi*)
+    CC="armv7a-linux-androideabi${ANDROID_API}-clang"
+    CXX="armv7a-linux-androideabi${ANDROID_API}-clang++"
+    LD="arm-linux-androideabi-ld"
+    AS="arm-linux-androideabi-as"
+    AR="arm-linux-androideabi-ar"
+    RANLIB="arm-linux-androideabi-ranlib"
+    STRIP="arm-linux-androideabi-strip"
+    OBJDUMP="arm-linux-androideabi-objdump"
+
+    # You may need this on older NDKs
+    # ANDROID_CPPFLAGS="-D__ANDROID__=${ANDROID_API}"
+
+    # Android NDK r19 and r20 no longer use -mfloat-abi=softfp. Add it as required.
+    ANDROID_CFLAGS="-target armv7-none-linux-androideabi${ANDROID_API}"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -march=armv7-a -mthumb"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fno-addrsig -fno-experimental-isel"
+
+    ANDROID_CXXFLAGS="-target armv7-none-linux-androideabi${ANDROID_API}"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -march=armv7-a -mthumb"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -std=c++11 -stdlib=libc++"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fno-addrsig -fno-experimental-isel"
+    ;;
+
+  armv8*|aarch64|arm64*)
+    CC="aarch64-linux-android${ANDROID_API}-clang"
+    CXX="aarch64-linux-android${ANDROID_API}-clang++"
+    LD="aarch64-linux-android-ld"
+    AS="aarch64-linux-android-as"
+    AR="aarch64-linux-android-ar"
+    RANLIB="aarch64-linux-android-ranlib"
+    STRIP="aarch64-linux-android-strip"
+    OBJDUMP="aarch64-linux-android-objdump"
+
+    # You may need this on older NDKs
+    # ANDROID_CPPFLAGS="-D__ANDROID__=${ANDROID_API}"
+
+    ANDROID_CFLAGS="-target aarch64-none-linux-android${ANDROID_API}"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fno-addrsig -fno-experimental-isel"
+
+    ANDROID_CXXFLAGS="-target aarch64-none-linux-android${ANDROID_API}"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -std=c++11 -stdlib=libc++"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fno-addrsig -fno-experimental-isel"
+    ;;
+
+  i686|x86)
+    CC="i686-linux-android${ANDROID_API}-clang"
+    CXX="i686-linux-android${ANDROID_API}-clang++"
+    LD="i686-linux-android-ld"
+    AS="i686-linux-android-as"
+    AR="i686-linux-android-ar"
+    RANLIB="i686-linux-android-ranlib"
+    STRIP="i686-linux-android-strip"
+    OBJDUMP="i686-linux-android-objdump"
+
+    # You may need this on older NDKs
+    # ANDROID_CPPFLAGS="-D__ANDROID__=${ANDROID_API}"
+
+    ANDROID_CFLAGS="-target i686-none-linux-android${ANDROID_API}"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -mtune=intel -mssse3 -mfpmath=sse"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fno-addrsig -fno-experimental-isel"
+
+    ANDROID_CXXFLAGS="-target i686-none-linux-android${ANDROID_API}"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -mtune=intel -mssse3 -mfpmath=sse"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -std=c++11 -stdlib=libc++"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fno-addrsig -fno-experimental-isel"
+    ;;
+
   x86_64|x64)
-	TOOLCHAIN_ARCH="x86_64"
-	TOOLCHAIN_NAME="x86_64-linux-android"
-	AOSP_ABI="x86_64"
-	AOSP_ARCH="arch-x86_64"
-	AOSP_FLAGS="-march=x86-64 -msse4.2 -mpopcnt -mtune=intel -funwind-tables -fexceptions -frtti"
-	;;
+    CC="x86_64-linux-android${ANDROID_API}-clang"
+    CXX="x86_64-linux-android${ANDROID_API}-clang++"
+    LD="x86_64-linux-android-ld"
+    AS="x86_64-linux-android-as"
+    AR="x86_64-linux-android-ar"
+    RANLIB="x86_64-linux-android-ranlib"
+    STRIP="x86_64-linux-android-strip"
+    OBJDUMP="x86_64-linux-android-objdump"
+
+    # You may need this on older NDKs
+    # ANDROID_CPPFLAGS="-D__ANDROID__=${ANDROID_API}"
+
+    ANDROID_CFLAGS="-target x86_64-none-linux-android${ANDROID_API}"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -march=x86-64 -msse4.2 -mpopcnt -mtune=intel"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CFLAGS="${ANDROID_CFLAGS} -fno-addrsig -fno-experimental-isel"
+
+    ANDROID_CXXFLAGS="-target x86_64-none-linux-android${ANDROID_API}"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -march=x86-64 -msse4.2 -mpopcnt -mtune=intel"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -std=c++11 -stdlib=libc++"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fstack-protector-strong -funwind-tables -fexceptions -frtti"
+    ANDROID_CXXFLAGS="${ANDROID_CXXFLAGS} -fno-addrsig -fno-experimental-isel"
+    ;;
   *)
-	echo "ERROR: Unknown architecture $1"
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-	;;
+    echo "ERROR: Unknown architecture ${ANDROID_CPU}"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+    ;;
 esac
 
-#####################################################################
-
-# GNUmakefile-cross expects these to be set. They are also used in the tests below.
-export IS_ANDROID=1
-export AOSP_FLAGS
-
-# TODO: for the previous GNUmakefile-cross. These can go away eventually.
-export ANDROID_FLAGS=$AOSP_FLAGS
-
-export CPP="$TOOLCHAIN_NAME-cpp"
-export CC="$TOOLCHAIN_NAME-gcc"
-export CXX="$TOOLCHAIN_NAME-g++"
-export LD="$TOOLCHAIN_NAME-ld"
-export AS="$TOOLCHAIN_NAME-as"
-export AR="$TOOLCHAIN_NAME-ar"
-export RANLIB="$TOOLCHAIN_NAME-ranlib"
-export STRIP="$TOOLCHAIN_NAME-strip"
+echo "Configuring for Android API ${ANDROID_API} ($ANDROID_CPU)"
 
 #####################################################################
 
-# Based on ANDROID_NDK_ROOT, try and pick up the path for the tools. We expect something
-# like /opt/android-ndk-r10e/toolchains/arm-linux-androideabi-4.7/prebuilt/linux-x86_64/bin
-# Once we locate the tools, we add it to the PATH.
-AOSP_TOOLCHAIN_PATH=""
-for host in "linux-x86_64" "darwin-x86_64" "linux-x86" "darwin-x86"
-do
-	if [ -d "$ANDROID_NDK_ROOT/toolchains/$TOOLCHAIN_ARCH-$AOSP_TOOLCHAIN_SUFFIX/prebuilt/$host/bin" ]; then
-		AOSP_TOOLCHAIN_PATH="$ANDROID_NDK_ROOT/toolchains/$TOOLCHAIN_ARCH-$AOSP_TOOLCHAIN_SUFFIX/prebuilt/$host/bin"
-		break
-	fi
-done
+# Common to all builds
 
-# Error checking
-if [ -z "$AOSP_TOOLCHAIN_PATH" ] || [ ! -d "$AOSP_TOOLCHAIN_PATH" ]; then
-	echo "ERROR: AOSP_TOOLCHAIN_PATH is not valid. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
+ANDROID_CPPFLAGS="${DEF_CPPFLAGS} ${ANDROID_CPPFLAGS} -DANDROID"
+ANDROID_CFLAGS="${DEF_CFLAGS} ${ANDROID_CFLAGS} -Wa,--noexecstack"
+ANDROID_CXXFLAGS="${DEF_CXXFLAGS} ${ANDROID_CXXFLAGS} -Wa,--noexecstack"
+ANDROID_LDFLAGS="${DEF_LDFLAGS}"
 
-# Error checking
-if [ ! -e "$AOSP_TOOLCHAIN_PATH/$CPP" ]; then
-	echo "ERROR: Failed to find Android cpp. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-# Error checking
-if [ ! -e "$AOSP_TOOLCHAIN_PATH/$CC" ]; then
-	echo "ERROR: Failed to find Android gcc. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-if [ ! -e "$AOSP_TOOLCHAIN_PATH/$CXX" ]; then
-	echo "ERROR: Failed to find Android g++. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-# Error checking
-if [ ! -e "$AOSP_TOOLCHAIN_PATH/$RANLIB" ]; then
-	echo "ERROR: Failed to find Android ranlib. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-# Error checking
-if [ ! -e "$AOSP_TOOLCHAIN_PATH/$AR" ]; then
-	echo "ERROR: Failed to find Android ar. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-# Error checking
-if [ ! -e "$AOSP_TOOLCHAIN_PATH/$AS" ]; then
-	echo "ERROR: Failed to find Android as. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-# Error checking
-if [ ! -e "$AOSP_TOOLCHAIN_PATH/$LD" ]; then
-	echo "ERROR: Failed to find Android ld. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-# Only modify/export PATH if AOSP_TOOLCHAIN_PATH good
-if [ -d "$AOSP_TOOLCHAIN_PATH" ]; then
-
-	# And only modify PATH if AOSP_TOOLCHAIN_PATH is not present
-	LEN=${#AOSP_TOOLCHAIN_PATH}
-	SUBSTR=${PATH:0:$LEN}
-	if [ "$SUBSTR" != "$AOSP_TOOLCHAIN_PATH" ]; then
-		export PATH="$AOSP_TOOLCHAIN_PATH":"$PATH"
-	fi
-fi
+# Aarch64 ld does not understand --warn-execstack
+ANDROID_LDFLAGS="${ANDROID_LDFLAGS} -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now"
+ANDROID_LDFLAGS="${ANDROID_LDFLAGS} -Wl,--warn-shared-textrel -Wl,--warn-common"
+ANDROID_LDFLAGS="${ANDROID_LDFLAGS} -Wl,--warn-unresolved-symbols"
+ANDROID_LDFLAGS="${ANDROID_LDFLAGS} -Wl,--gc-sections -Wl,--fatal-warnings"
 
 #####################################################################
 
 # Error checking
-if [ ! -d "$ANDROID_NDK_ROOT/platforms/$AOSP_API" ]; then
-	echo "ERROR: AOSP_API is not valid. Does the NDK support the API? Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-elif [ ! -d "$ANDROID_NDK_ROOT/platforms/$AOSP_API/$AOSP_ARCH" ]; then
-	echo "ERROR: AOSP_ARCH is not valid. Does the NDK support the architecture? Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-fi
-
-# Android SYSROOT. It will be used on the command line with --sysroot
-#   http://android.googlesource.com/platform/ndk/+/ics-mr0/docs/STANDALONE-TOOLCHAIN.html
-export AOSP_SYSROOT="$ANDROID_NDK_ROOT/platforms/$AOSP_API/$AOSP_ARCH"
-
-# TODO: export for the previous GNUmakefile-cross. These can go away eventually.
-export ANDROID_SYSROOT=$AOSP_SYSROOT
-
-#####################################################################
-
-# Android STL. We support GNU, LLVM and STLport out of the box.
-
-if [ "$#" -lt 2 ]; then
-	THE_STL=gnu-shared
-else
-	THE_STL=$(tr [A-Z] [a-z] <<< "$2")
-fi
-
-case "$THE_STL" in
-  stlport-static)
-	AOSP_STL_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/stlport/stlport/"
-	AOSP_STL_LIB="$ANDROID_NDK_ROOT/sources/cxx-stl/stlport/libs/$AOSP_ABI/libstlport_static.a"
-	;;
-  stlport|stlport-shared)
-	AOSP_STL_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/stlport/stlport/"
-	AOSP_STL_LIB="$ANDROID_NDK_ROOT/sources/cxx-stl/stlport/libs/$AOSP_ABI/libstlport_shared.so"
-	;;
-  gabi++-static|gnu-static)
-	AOSP_STL_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/gnu-libstdc++/$AOSP_TOOLCHAIN_SUFFIX/include"
-	AOSP_BITS_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/gnu-libstdc++/$AOSP_TOOLCHAIN_SUFFIX/libs/$AOSP_ABI/include"
-	AOSP_STL_LIB="$ANDROID_NDK_ROOT/sources/cxx-stl/gnu-libstdc++/$AOSP_TOOLCHAIN_SUFFIX/libs/$AOSP_ABI/libgnustl_static.a"
-	;;
-  gnu|gabi++|gnu-shared|gabi++-shared)
-	AOSP_STL_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/gnu-libstdc++/$AOSP_TOOLCHAIN_SUFFIX/include"
-	AOSP_BITS_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/gnu-libstdc++/$AOSP_TOOLCHAIN_SUFFIX/libs/$AOSP_ABI/include"
-	AOSP_STL_LIB="$ANDROID_NDK_ROOT/sources/cxx-stl/gnu-libstdc++/$AOSP_TOOLCHAIN_SUFFIX/libs/$AOSP_ABI/libgnustl_shared.so"
-	;;
-  llvm-static)
-	AOSP_STL_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/llvm-libc++/libcxx/include"
-	AOSP_STL_LIB="$ANDROID_NDK_ROOT/sources/cxx-stl/llvm-libc++/libs/$AOSP_ABI/libc++_static.a"
-	;;
-  llvm|llvm-shared)
-	AOSP_STL_INC="$ANDROID_NDK_ROOT/sources/cxx-stl/llvm-libc++/libcxx/include"
-	AOSP_STL_LIB="$ANDROID_NDK_ROOT/sources/cxx-stl/llvm-libc++/libs/$AOSP_ABI/libc++_shared.so"
-	;;
-  *)
-	echo "ERROR: Unknown STL library $2"
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
-esac
-
-# Error checking
-if [ ! -d "$AOSP_STL_INC" ] || [ ! -e "$AOSP_STL_INC/memory" ]; then
-	echo "ERROR: AOSP_STL_INC is not valid. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
+if [ ! -e "${ANDROID_TOOLCHAIN}/$CC" ]; then
+    echo "ERROR: Failed to find Android clang. Please edit this script."
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
 fi
 
 # Error checking
-if [ ! -e "$AOSP_STL_LIB" ]; then
-	echo "ERROR: AOSP_STL_LIB is not valid. Please edit this script."
-	[ "$0" = "$BASH_SOURCE" ] && exit 1 || return 1
+if [ ! -e "${ANDROID_TOOLCHAIN}/$CXX" ]; then
+    echo "ERROR: Failed to find Android clang++. Please edit this script."
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
 fi
 
-export AOSP_STL_INC
-export AOSP_STL_LIB
+# Error checking
+if [ ! -e "${ANDROID_TOOLCHAIN}/$RANLIB" ]; then
+    echo "ERROR: Failed to find Android ranlib. Please edit this script."
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
 
-# TODO: for the previous GNUmakefile-cross. These can go away eventually.
-export ANDROID_STL_INC=$AOSP_STL_INC
-export ANDROID_STL_LIB=$AOSP_STL_LIB
+# Error checking
+if [ ! -e "${ANDROID_TOOLCHAIN}/$AR" ]; then
+    echo "ERROR: Failed to find Android ar. Please edit this script."
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
 
-if [ ! -z "$AOSP_BITS_INC" ]; then
-	export AOSP_BITS_INC
+# Error checking
+if [ ! -e "${ANDROID_TOOLCHAIN}/$AS" ]; then
+    echo "ERROR: Failed to find Android as. Please edit this script."
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+# Error checking
+if [ ! -e "${ANDROID_TOOLCHAIN}/$LD" ]; then
+    echo "ERROR: Failed to find Android ld. Please edit this script."
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
 fi
 
 #####################################################################
 
-VERBOSE=1
-if [ ! -z "$VERBOSE" ] && [ "$VERBOSE" != "0" ]; then
-  echo "ANDROID_NDK_ROOT: $ANDROID_NDK_ROOT"
-  echo "AOSP_TOOLCHAIN_PATH: $AOSP_TOOLCHAIN_PATH"
-  echo "AOSP_ABI: $AOSP_ABI"
-  echo "AOSP_API: $AOSP_API"
-  echo "AOSP_SYSROOT: $AOSP_SYSROOT"
-  echo "AOSP_FLAGS: $AOSP_FLAGS"
-  echo "AOSP_STL_INC: $AOSP_STL_INC"
-  echo "AOSP_STL_LIB: $AOSP_STL_LIB"
-  if [ ! -z "$AOSP_BITS_INC" ]; then
-    echo "AOSP_BITS_INC: $AOSP_BITS_INC"
+# Add tools to head of path, if not present already
+LENGTH=${#ANDROID_TOOLCHAIN}
+SUBSTR=${PATH:0:$LENGTH}
+if [ "$SUBSTR" != "${ANDROID_TOOLCHAIN}" ]; then
+    export PATH="${ANDROID_TOOLCHAIN}:$PATH"
+fi
+
+#####################################################################
+
+# Now that we are using cpu-features from Android rather than
+# CPU probing, we need to copy cpu-features.h and cpu-features.c
+# from the NDK into our source directory and then build it.
+
+if [[ ! -e "${ANDROID_NDK_ROOT}/sources/android/cpufeatures/cpu-features.h" ]]; then
+    echo "ERROR: Unable to locate cpu-features.h"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+if [[ ! -e "${ANDROID_NDK_ROOT}/sources/android/cpufeatures/cpu-features.c" ]]; then
+    echo "ERROR: Unable to locate cpu-features.c"
+    [ "$0" = "${BASH_SOURCE[0]}" ] && exit 1 || return 1
+fi
+
+cp "${ANDROID_NDK_ROOT}/sources/android/cpufeatures/cpu-features.h" .
+cp "${ANDROID_NDK_ROOT}/sources/android/cpufeatures/cpu-features.c" .
+
+# Cleanup the sources for the C++ compiler
+# https://github.com/weidai11/cryptopp/issues/926
+
+sed -e 's/= memmem/= (const char*)memmem/g' \
+    -e 's/= memchr/= (const char*)memchr/g' \
+    -e 's/= malloc/= (char*)malloc/g' \
+    cpu-features.c > cpu-features.c.fixed
+mv cpu-features.c.fixed cpu-features.c
+
+# Fix permissions. For some reason cpu-features.h is +x.
+chmod u=rw,go=r cpu-features.h cpu-features.c
+
+#####################################################################
+
+VERBOSE=${VERBOSE:-1}
+if [ "$VERBOSE" -gt 0 ]; then
+  echo "ANDROID_TOOLCHAIN: ${ANDROID_TOOLCHAIN}"
+  echo "ANDROID_API: ${ANDROID_API}"
+  echo "ANDROID_CPU: ${ANDROID_CPU}"
+  if [ -n "${ANDROID_CPPFLAGS}" ]; then
+    echo "ANDROID_CPPFLAGS: ${ANDROID_CPPFLAGS}"
+  fi
+  echo "ANDROID_CFLAGS: ${ANDROID_CFLAGS}"
+  echo "ANDROID_CXXFLAGS: ${ANDROID_CXXFLAGS}"
+  if [ -n "${ANDROID_LDFLAGS}" ]; then
+    echo "ANDROID_LDFLAGS: ${ANDROID_LDFLAGS}"
+  fi
+  echo "ANDROID_SYSROOT: ${ANDROID_SYSROOT}"
+  if [ -e "cpu-features.h" ] && [ -e "cpu-features.c" ]; then
+    echo "CPU FEATURES: cpu-features.h and cpu-features.c are present"
   fi
 fi
 
 #####################################################################
 
-COUNT=$(echo -n "$AOSP_STL_LIB" | grep -i -c 'libstdc++')
-if [[ ("$COUNT" -ne "0") ]]; then
-	echo
-	echo "*******************************************************************************"
-	echo "You are using GNU's runtime and STL library. Please ensure the resulting"
-	echo "binary meets licensing requirements. If you can't use GNU's runtime"
-	echo "and STL library, then reconfigure with stlport or llvm. Also see"
-	echo "http://code.google.com/p/android/issues/detail?id=216331"
-	echo "*******************************************************************************"
-fi
+# GNUmakefile-cross and Autotools expect these to be set.
+# Note: prior to Crypto++ 8.6, CPPFLAGS, CXXFLAGS and LDFLAGS were not
+# exported. At Crypto++ 8.6 CPPFLAGS, CXXFLAGS and LDFLAGS were exported.
 
-COUNT=$(echo -n "$AOSP_STL_LIB" | grep -i -c 'libstlport')
-if [[ ("$COUNT" -ne "0") ]]; then
-	echo
-	echo "*******************************************************************************"
-	echo "You are using STLport's runtime and STL library. STLport could cause problems"
-	echo "if the resulting binary is used in other environments, like a QT project."
-	echo "Also see http://code.google.com/p/android/issues/detail?id=216331"
-	echo "*******************************************************************************"
-fi
+export IS_ANDROID=1
+export CPP CC CXX LD AS AR RANLIB STRIP OBJDUMP
 
-COUNT=$(echo -n "$AOSP_STL_LIB" | egrep -i -c 'libc++)')
-if [[ ("$COUNT" -ne "0") ]]; then
-	echo
-	echo "*******************************************************************************"
-	echo "You are using LLVM's runtime and STL library. LLVM could cause problems"
-	echo "if the resulting binary is used in other environments, like a QT project."
-	echo "Also see http://code.google.com/p/android/issues/detail?id=216331"
-	echo "*******************************************************************************"
-fi
+# Do NOT use ANDROID_SYSROOT_INC or ANDROID_SYSROOT_LD
+# https://github.com/android/ndk/issues/894#issuecomment-470837964
+
+CPPFLAGS="${ANDROID_CPPFLAGS} -isysroot ${ANDROID_SYSROOT}"
+CFLAGS="${ANDROID_CFLAGS}"
+CXXFLAGS="${ANDROID_CXXFLAGS}"
+LDFLAGS="${ANDROID_LDFLAGS} --sysroot ${ANDROID_SYSROOT}"
+
+# Trim whitespace as needed
+CPPFLAGS=$(echo "${CPPFLAGS}" | awk '{$1=$1;print}')
+CFLAGS=$(echo "${CFLAGS}" | awk '{$1=$1;print}')
+CXXFLAGS=$(echo "${CXXFLAGS}" | awk '{$1=$1;print}')
+LDFLAGS=$(echo "${LDFLAGS}" | awk '{$1=$1;print}')
+
+export CPPFLAGS CFLAGS CXXFLAGS LDFLAGS
+
+#####################################################################
 
 echo
 echo "*******************************************************************************"
-echo "It looks the the environment is set correctly. Your next step is"
-echo "build the library with 'make -f GNUmakefile-cross'"
+echo "It looks the the environment is set correctly. Your next step is build"
+echo "the library with 'make -f GNUmakefile-cross'."
 echo "*******************************************************************************"
 echo
 
-[ "$0" = "$BASH_SOURCE" ] && exit 0 || return 0
+[ "$0" = "${BASH_SOURCE[0]}" ] && exit 0 || return 0
